@@ -2,6 +2,7 @@ import os
 import json
 import hashlib
 import inspect
+from concurrent.futures import ThreadPoolExecutor
 
 import gdown
 import numpy as np
@@ -85,6 +86,9 @@ st.markdown(
     [data-testid="stFileUploader"] { background:#FFF; border:1px dashed #B98255;
         border-radius:16px; padding:12px; }
     hr { border-color:#E8D7C8; }
+    .waiting-track { height:9px; overflow:hidden; border-radius:999px; background:#E8D7C8; margin:14px 0 8px; }
+    .waiting-shimmer { height:100%; width:38%; border-radius:999px; background:linear-gradient(90deg,#674438,#D1A27D,#674438); animation:brainBloomProgress 1.8s ease-in-out infinite; }
+    @keyframes brainBloomProgress { 0% { transform:translateX(-110%); } 100% { transform:translateX(290%); } }
     </style>
     """,
     unsafe_allow_html=True,
@@ -271,6 +275,88 @@ def stability_test(image_array, predicted_index, samples, first_weights):
     return len(first_top & second_top) / len(union) if union else 0.0
 
 # ============================================================
+# 6. BACKGROUND LIME JOBS
+# ============================================================
+@st.cache_resource(show_spinner=False)
+def get_lime_executor():
+    """One background worker avoids running multiple LIME jobs at once."""
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="brain-bloom-lime")
+
+
+def run_lime_job(image_array, predicted_index, image_hash):
+    """Compute LIME off the main Streamlit script thread."""
+    image_array = np.asarray(image_array, dtype=np.uint8).copy()
+    explanation = make_lime_explanation(
+        image_array, int(predicted_index), samples=LIME_SAMPLES, seed=42
+    )
+    visual, weights, segments = render_lime_overlay(
+        image_array, explanation, int(predicted_index), LIME_FEATURES
+    )
+    return {
+        "visual": visual,
+        "weights": weights,
+        "segments": segments,
+        "predicted_index": int(predicted_index),
+        "samples": LIME_SAMPLES,
+        "input_image": image_array,
+        "image_hash": image_hash,
+    }
+
+
+# Short anatomy/AI questions are available while the background LIME job runs.
+WAITING_QUIZ = [
+    {
+        "question": "Which organ exchanges oxygen and carbon dioxide during breathing?",
+        "options": ["The lungs", "The kidneys", "The liver", "The skeleton"],
+        "answer": "The lungs",
+        "explanation": "The lungs exchange oxygen and carbon dioxide between air and blood.",
+    },
+    {
+        "question": "What is a major job of the kidneys?",
+        "options": ["Filter blood and regulate fluids", "Produce bile", "Exchange gases", "Store long-term memories"],
+        "answer": "Filter blood and regulate fluids",
+        "explanation": "The kidneys filter blood and help regulate fluid and electrolyte balance.",
+    },
+    {
+        "question": "Which molecule stores hereditary information?",
+        "options": ["DNA", "Bile", "Hemoglobin only", "Collagen only"],
+        "answer": "DNA",
+        "explanation": "DNA carries genetic instructions used in development and cell function.",
+    },
+    {
+        "question": "What is the heart's main pumping role?",
+        "options": ["Circulate blood", "Digest food mechanically", "Filter urine", "Create bone tissue"],
+        "answer": "Circulate blood",
+        "explanation": "The heart pumps blood through the circulatory system.",
+    },
+    {
+        "question": "Which organ produces bile that helps with fat digestion?",
+        "options": ["The liver", "The lungs", "The brain", "The teeth"],
+        "answer": "The liver",
+        "explanation": "The liver produces bile, which helps the digestive system process fats.",
+    },
+    {
+        "question": "In this app, what does LIME primarily provide?",
+        "options": ["A local explanation of a model prediction", "A confirmed tumour boundary", "A new trained model", "A medical diagnosis"],
+        "answer": "A local explanation of a model prediction",
+        "explanation": "LIME approximates a model locally; it does not certify a tumour boundary or diagnose disease.",
+    },
+    {
+        "question": "What does a green LIME region mean in this app?",
+        "options": ["It supports the selected predicted class", "It is proven tumour tissue", "It must be healthy tissue", "It is the highest-accuracy part of the MRI"],
+        "answer": "It supports the selected predicted class",
+        "explanation": "The colour encodes the direction of local contribution, not a clinical tissue label.",
+    },
+    {
+        "question": "VGG16 is best described as which kind of model architecture?",
+        "options": ["A convolutional neural network", "A decision tree", "A relational database", "A sorting algorithm"],
+        "answer": "A convolutional neural network",
+        "explanation": "VGG16 is a convolutional neural network architecture commonly used for image tasks.",
+    },
+]
+
+
+# ============================================================
 # 6. SIDEBAR
 # ============================================================
 with st.sidebar:
@@ -334,12 +420,21 @@ tab_predict, tab_anatomy, tab_performance, tab_about = st.tabs(
 )
 
 # ============================================================
-# 8. MRI PREDICTION + LIME (NO SLIDERS)
+# 8. MRI PREDICTION + LIME (NO SLIDERS; LIME RUNS IN BACKGROUND)
 # ============================================================
 with tab_predict:
     st.markdown("## 🤎 Your MRI analysis lab")
     st.write("Upload an MRI to see the VGG16 classification and optionally generate a LIME explanation.")
-    uploaded_file = st.file_uploader("📁 Choose your MRI image", type=["jpg", "jpeg", "png"], key="mri_upload")
+
+    if "upload_widget_version" not in st.session_state:
+        st.session_state["upload_widget_version"] = 0
+
+    upload_key = f"mri_upload_{st.session_state['upload_widget_version']}"
+    uploaded_file = st.file_uploader(
+        "📁 Choose your MRI image",
+        type=["jpg", "jpeg", "png"],
+        key=upload_key,
+    )
 
     if uploaded_file is not None:
         file_bytes = uploaded_file.getvalue()
@@ -347,7 +442,11 @@ with tab_predict:
         if st.session_state.get("current_image_hash") != image_hash:
             st.session_state["current_image_hash"] = image_hash
             for key in ("lime_result", "lime_error", "masking_result", "stability_result", "prediction"):
-                st.session_state.pop(key, None)
+                value = st.session_state.get(key)
+                if key == "lime_result" and value and value.get("image_hash") != image_hash:
+                    st.session_state.pop(key, None)
+                elif key != "lime_result":
+                    st.session_state.pop(key, None)
 
         try:
             original = Image.open(uploaded_file).convert("RGB")
@@ -359,10 +458,11 @@ with tab_predict:
                 st.caption("The model input is resized to 224 × 224 pixels.")
             with result_col:
                 st.markdown("### 🩺 Model prediction")
-                if "prediction" not in st.session_state:
+                prediction_key = f"prediction_{image_hash}"
+                if prediction_key not in st.session_state:
                     with st.spinner("Analysing the MRI image..."):
-                        st.session_state["prediction"] = predict_probabilities(input_image)[0]
-                probabilities = np.asarray(st.session_state["prediction"])
+                        st.session_state[prediction_key] = predict_probabilities(input_image)[0]
+                probabilities = np.asarray(st.session_state[prediction_key])
                 predicted_index = int(np.argmax(probabilities))
                 predicted_class = CLASS_NAMES[predicted_index]
                 confidence = float(probabilities[predicted_index])
@@ -380,53 +480,126 @@ with tab_predict:
 
             st.divider()
             st.markdown("## 🧩 Explain this prediction")
-            st.write(
-                "LIME highlights image regions that influence the model's prediction."
+            st.write("LIME highlights image regions that influence the model's prediction.")
+
+            # Collect a finished background result without forcing an extra rerun.
+            # This is important: calling st.rerun() here can interrupt a click
+            # the user made in another tab (for example, an Anatomy Garden card).
+            task = st.session_state.get("lime_task")
+            if task is not None and task["future"].done():
+                try:
+                    completed_result = task["future"].result()
+                    if completed_result.get("image_hash") == image_hash:
+                        st.session_state["lime_result"] = completed_result
+                        st.session_state.pop("lime_error", None)
+                except Exception as exc:
+                    st.session_state["lime_error"] = {
+                        "image_hash": task["image_hash"],
+                        "message": f"{type(exc).__name__}: {exc}",
+                    }
+                finally:
+                    st.session_state.pop("lime_task", None)
+
+            task = st.session_state.get("lime_task")
+            task_running = task is not None and not task["future"].done()
+            existing = st.session_state.get("lime_result")
+            has_current_result = (
+                existing is not None and existing.get("image_hash") == image_hash
             )
+
             generate_clicked = st.button(
-                "✨ Generate LIME explanation", type="primary", use_container_width=True, key="generate_lime"
+                "✨ Generate LIME explanation",
+                type="primary",
+                use_container_width=True,
+                key="generate_lime",
+                disabled=task_running or has_current_result,
             )
 
             if generate_clicked:
-                existing = st.session_state.get("lime_result")
-                if existing is not None and existing.get("image_hash") == image_hash:
-                    st.info("A LIME explanation is already available for this image.")
-                else:
-                    st.session_state.pop("lime_error", None)
-                    try:
-                        with st.spinner(
-                            "Generating LIME explanation. The first run can take longer while TensorFlow prepares inference."
-                        ):
-                            explanation = make_lime_explanation(
-                                input_image.astype(np.uint8),
-                                predicted_index,
-                                samples=LIME_SAMPLES,
-                                seed=42,
-                            )
-                            visual, weights, segments = render_lime_overlay(
-                                input_image.astype(np.uint8),
-                                explanation,
-                                predicted_index,
-                                LIME_FEATURES,
-                            )
-                            score = getattr(explanation, "score", None)
-                            st.session_state["lime_result"] = {
-                                "visual": visual,
-                                "weights": weights,
-                                "segments": segments,
-                                "score": score,
-                                "predicted_index": predicted_index,
-                                "samples": LIME_SAMPLES,
-                                "input_image": input_image.astype(np.uint8),
-                                "image_hash": image_hash,
-                            }
-                    except Exception as exc:
-                        st.session_state["lime_error"] = f"{type(exc).__name__}: {exc}"
+                st.session_state.pop("lime_error", None)
+                st.session_state["wait_quiz_index"] = 0
+                future = get_lime_executor().submit(
+                    run_lime_job,
+                    input_image.astype(np.uint8).copy(),
+                    int(predicted_index),
+                    image_hash,
+                )
+                st.session_state["lime_task"] = {
+                    "future": future,
+                    "image_hash": image_hash,
+                }
 
-            if st.session_state.get("lime_error"):
-                st.error("Unable to generate the LIME explanation.")
-                with st.expander("Technical error details"):
-                    st.code(st.session_state["lime_error"])
+            # Re-read task state after a submit so the waiting panel appears
+            # immediately. Do NOT poll with st.fragment(run_every=...), since
+            # repeated fragment reruns can make the app feel continuously busy
+            # and get in the way of navigating/interacting with other features.
+            task = st.session_state.get("lime_task")
+            task_running = task is not None and not task["future"].done()
+            if task_running:
+                st.markdown(
+                    "<div class='soft-card'><b>⏳ LIME is running in the background</b>"
+                    "<p>You can switch to Anatomy Garden, Model Results, or About and use those features while the explanation is processing.</p>"
+                    "<div class='waiting-track'><div class='waiting-shimmer'></div></div>"
+                    "<small>The animation is an activity indicator, not a percentage estimate.</small></div>",
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    "When you return to this tab or interact with the app, the result/status will refresh."
+                )
+                st.button(
+                    "🔄 Refresh LIME status",
+                    key="refresh_lime_status",
+                    help="Refresh the app to check whether the background explanation has finished.",
+                )
+
+                # A simple quiz stays interactive without automatic fragment polling.
+                q_index = int(st.session_state.get("wait_quiz_index", 0)) % len(WAITING_QUIZ)
+                question = WAITING_QUIZ[q_index]
+                st.markdown("### 🎮 Brain Bloom quick quiz")
+                st.caption(f"Question {q_index + 1} of {len(WAITING_QUIZ)} · Play while LIME runs")
+                st.markdown(f"**{question['question']}**")
+                answer_key = f"wait_quiz_answer_{image_hash}_{q_index}"
+                submit_key = f"wait_quiz_submit_{image_hash}_{q_index}"
+                selected_answer = st.radio(
+                    "Choose your answer",
+                    question["options"],
+                    key=answer_key,
+                    label_visibility="collapsed",
+                )
+                check_col, next_col = st.columns(2)
+                with check_col:
+                    if st.button(
+                        "Check answer ✓",
+                        key=f"check_{image_hash}_{q_index}",
+                        use_container_width=True,
+                    ):
+                        st.session_state[submit_key] = True
+                with next_col:
+                    if st.button(
+                        "Next question →",
+                        key=f"next_{image_hash}_{q_index}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["wait_quiz_index"] = (q_index + 1) % len(WAITING_QUIZ)
+                        st.rerun()
+                if st.session_state.get(submit_key, False):
+                    if selected_answer == question["answer"]:
+                        st.success("Correct! " + question["explanation"])
+                    else:
+                        st.warning("Not quite. " + question["explanation"])
+            elif has_current_result:
+                st.caption("A LIME explanation is already available for this image.")
+            error_info = st.session_state.get("lime_error")
+            if error_info:
+                # Support both the image-scoped error dictionary and older string state.
+                if isinstance(error_info, dict) and error_info.get("image_hash") == image_hash:
+                    st.error("Unable to generate the LIME explanation.")
+                    with st.expander("Technical error details"):
+                        st.code(error_info.get("message", "Unknown error"))
+                elif isinstance(error_info, str):
+                    st.error("Unable to generate the LIME explanation.")
+                    with st.expander("Technical error details"):
+                        st.code(error_info)
 
             result = st.session_state.get("lime_result")
             if result is not None and result.get("image_hash") == image_hash:
@@ -446,19 +619,10 @@ with tab_predict:
                     unsafe_allow_html=True,
                 )
                 st.caption("Highlighted regions are local explanations, not confirmed tumour tissue.")
-                score = result["score"]
-                if score is not None and np.isfinite(score):
-                    st.metric("LIME local surrogate score (R²)", f"{score:.3f}")
-                    st.caption(
-                        "R² describes how well LIME's local surrogate fitted the model's perturbed predictions for this run. "
-                        "It is not a clinical-validity score and has no universal pass/fail cutoff."
-                    )
-                else:
-                    st.info("LIME did not provide a local surrogate score for this run.")
                 st.warning(
-                    "This overlay is a model explanation, not a tumour segmentation. "
+                    "This overlay is a local model explanation, not a tumour segmentation. "
                     "A plausible-looking image alone cannot confirm that the explanation is reliable. "
-                    "Review its local R², repeatability and masking sensitivity, and validate the method on a dataset before making research claims."
+                    "Use repeatability checks, masking sensitivity, and evaluation on a labelled dataset before making research claims."
                 )
 
                 with st.expander("Optional: masking sensitivity test"):
@@ -502,6 +666,21 @@ with tab_predict:
                             st.success("The top-region overlap is relatively high for these two runs.")
                         else:
                             st.warning("The explanation changed noticeably; consider this result unstable.")
+
+                st.divider()
+                if st.button(
+                    "🔄 Run another prediction",
+                    type="primary",
+                    use_container_width=True,
+                    key="run_another_prediction",
+                ):
+                    st.session_state["upload_widget_version"] += 1
+                    for state_key in (
+                        "current_image_hash", "lime_result", "lime_error", "masking_result",
+                        "stability_result", "prediction", "lime_task", "wait_quiz_index",
+                    ):
+                        st.session_state.pop(state_key, None)
+                    st.rerun()
         except Exception as exc:
             st.error("Unable to process the uploaded MRI image.")
             with st.expander("Technical details"):
@@ -515,36 +694,105 @@ with tab_predict:
         )
 
 # ============================================================
-# 9. ANATOMY GARDEN
+# 9. ANATOMY GARDEN — MORE FACTS PER ORGAN
 # ============================================================
 with tab_anatomy:
     st.markdown("## 🫀 Anatomy Garden")
-    st.write("Choose an anatomy card to reveal a short educational fact.")
+    st.write("Choose an organ card to explore several short educational facts.")
+
     organs = {
-        "🧠 Brain": "The brain processes information and supports memory, learning, sensation and movement.",
-        "❤️ Heart": "The heart pumps blood through the circulatory system, delivering oxygen and nutrients.",
-        "🫁 Lungs": "The lungs exchange oxygen and carbon dioxide during breathing.",
-        "🫘 Kidneys": "The kidneys filter blood and help regulate fluid and electrolyte balance.",
-        "🧬 DNA": "DNA stores hereditary information used in the development and functioning of living organisms.",
-        "🦴 Skeleton": "The skeleton supports the body, protects organs and works with muscles for movement.",
-        "🫀 Liver": "The liver processes nutrients, produces bile and metabolises many substances.",
-        "🦷 Teeth": "Teeth help break down food mechanically during digestion.",
+        "🧠 Brain": [
+            "The brain processes information and helps coordinate movement, sensation, memory and learning.",
+            "Different brain regions contribute to different functions and communicate through networks.",
+            "The cerebellum helps coordinate balance and precise movement.",
+            "MRI sequences can show different types of information about brain structure and tissue.",
+            "The brain and spinal cord together form the central nervous system.",
+        ],
+        "❤️ Heart": [
+            "The heart pumps blood through the circulatory system.",
+            "Blood carries oxygen and nutrients to tissues and helps transport waste products away.",
+            "The heart has four chambers: two atria and two ventricles.",
+            "Heart valves help keep blood moving in the intended direction.",
+            "Heart rate can change with activity, stress, sleep and other factors.",
+        ],
+        "🫁 Lungs": [
+            "The lungs exchange oxygen and carbon dioxide between air and blood.",
+            "The diaphragm is a major muscle involved in breathing.",
+            "Tiny air sacs called alveoli provide a large surface area for gas exchange.",
+            "The right lung usually has three lobes, while the left lung has two.",
+            "The respiratory system works with the circulatory system to deliver oxygen around the body.",
+        ],
+        "🫘 Kidneys": [
+            "The kidneys filter blood and help remove waste in urine.",
+            "They regulate water, electrolytes and acid–base balance.",
+            "The kidneys help regulate blood pressure through several mechanisms.",
+            "Nephrons are the microscopic functional units of the kidneys.",
+            "The kidneys help maintain the body's internal chemical balance.",
+        ],
+        "🧬 DNA": [
+            "DNA stores hereditary information used in the development and functioning of organisms.",
+            "DNA is built from four types of nucleotide bases: A, T, C and G.",
+            "In DNA, adenine pairs with thymine, while cytosine pairs with guanine.",
+            "Genes are segments of DNA that contribute to functional products such as proteins or RNAs.",
+            "Most human cells contain DNA organised into chromosomes in the nucleus.",
+        ],
+        "🦴 Skeleton": [
+            "The skeleton supports the body and helps protect internal organs.",
+            "Bones work with muscles and joints to enable movement.",
+            "Bone marrow produces blood cells.",
+            "Bones store minerals, including calcium and phosphate.",
+            "In adults, the skeleton typically contains 206 bones, though normal variation exists.",
+        ],
+        "🫀 Liver": [
+            "The liver processes nutrients absorbed from the digestive tract.",
+            "It produces bile, which helps the digestion and absorption of fats.",
+            "The liver helps process medicines and other substances.",
+            "It stores glycogen and helps regulate blood glucose levels.",
+            "The liver makes many proteins, including several involved in blood clotting.",
+        ],
+        "🦷 Teeth": [
+            "Teeth mechanically break food into smaller pieces during chewing.",
+            "Enamel is the hard outer covering of the crown of a tooth.",
+            "Dentin lies beneath enamel and forms much of a tooth's structure.",
+            "Saliva helps lubricate food and supports the early stages of digestion.",
+            "Brushing with fluoride toothpaste and cleaning between teeth help prevent tooth decay.",
+        ],
     }
-    if "selected_organ" not in st.session_state:
+
+    if "selected_organ" not in st.session_state or st.session_state["selected_organ"] not in organs:
         st.session_state["selected_organ"] = "🧠 Brain"
+
     organ_items = list(organs.items())
-    for start in range(0, len(organ_items), 4):
+    for start_index in range(0, len(organ_items), 4):
         columns = st.columns(4)
-        for col, (organ, fact) in zip(columns, organ_items[start:start + 4]):
+        for col, (organ, facts) in zip(columns, organ_items[start_index:start_index + 4]):
             with col:
-                st.markdown(f'<div class="soft-card" style="text-align:center;min-height:105px;"><h3>{organ}</h3></div>', unsafe_allow_html=True)
-                if st.button("Explore ✨", key=f"organ_{organ}", use_container_width=True):
+                icon = organ.split(" ")[0]
+                name = organ.split(" ", 1)[1]
+                st.markdown(
+                    f'<div class="soft-card" style="text-align:center;min-height:95px;"><div style="font-size:2.2rem;">{icon}</div><h3>{name}</h3><p>{len(facts)} quick facts</p></div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button("Explore ✨", key=f"organ_{name}", use_container_width=True):
                     st.session_state["selected_organ"] = organ
+
     selected = st.session_state["selected_organ"]
+    selected_icon = selected.split(" ")[0]
+    selected_name = selected.split(" ", 1)[1]
     st.markdown(
-        f'<div class="hero"><div class="hero-art">{selected.split(" ")[0]}</div><h2>{selected}</h2><p>{organs[selected]}</p></div>',
+        f'<div class="hero"><div class="hero-art">{selected_icon}</div><h2>{selected_name}</h2><p>Discover the body, one fact at a time.</p></div>',
         unsafe_allow_html=True,
     )
+    facts = organs[selected]
+    fact_columns = st.columns(2)
+    for i, fact in enumerate(facts):
+        with fact_columns[i % 2]:
+            st.markdown(
+                f'<div class="soft-card"><b>💡 Fact {i + 1}</b><p>{fact}</p></div>',
+                unsafe_allow_html=True,
+            )
+
+    st.info("These are general educational facts, not assessments of a person's health.")
 
 # ============================================================
 # 10. MODEL PERFORMANCE
