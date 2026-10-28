@@ -1,6 +1,7 @@
 
 import os
 import json
+import hashlib
 import gdown
 import numpy as np
 import streamlit as st
@@ -10,7 +11,6 @@ from PIL import Image
 from tensorflow.keras.applications.vgg16 import preprocess_input
 from lime.lime_image import LimeImageExplainer
 from skimage.segmentation import mark_boundaries, slic
-
 
 # =========================================================
 # 1. CONFIGURATION
@@ -32,95 +32,151 @@ CLASS_NAMES = ["Glioma", "Meningioma"]
 
 
 # =========================================================
-# 2. COLOURFUL AESTHETIC DESIGN
+# 2. CHOCOLATE BROWN AND CREAM DESIGN
 # =========================================================
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Nunito:wght@400;600;700;800&display=swap');
 
+:root {
+    --chocolate: #4B2E24;
+    --cocoa: #674438;
+    --caramel: #B98255;
+    --cream: #FFF9F1;
+    --white: #FFFFFF;
+    --muted: #705D53;
+    --border: #E8D7C8;
+}
+
 .stApp {
-    background: linear-gradient(135deg, #FFF7FB 0%, #F4F0FF 48%, #EFFFF9 100%);
+    background: linear-gradient(
+        135deg, #FFF9F1 0%, #F8F0E7 55%, #FDFBF7 100%
+    );
+    color: var(--chocolate);
     font-family: 'DM Sans', sans-serif;
 }
 
-h1, h2, h3 {
-    color: #493B69 !important;
+[data-testid="stAppViewContainer"],
+[data-testid="stHeader"] {
+    background: transparent;
+}
+
+[data-testid="stMarkdownContainer"],
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stCaptionContainer"],
+[data-testid="stWidgetLabel"],
+[data-testid="stFileUploader"] *,
+.stRadio, .stCheckbox, label {
+    color: var(--chocolate) !important;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    color: var(--chocolate) !important;
     font-family: 'Nunito', sans-serif !important;
+    font-weight: 800 !important;
 }
 
 .main-title {
     text-align: center;
     font-family: 'Nunito', sans-serif;
-    font-size: 2.8rem;
+    font-size: clamp(2.3rem, 5vw, 3.6rem);
+    line-height: 1.15;
     font-weight: 800;
-    color: #7455A6;
-    padding-top: 12px;
+    color: #4B2E24;
+    padding-top: 14px;
 }
 
 .subtitle {
     text-align: center;
-    color: #88799D;
-    font-size: 1.05rem;
+    color: #705D53 !important;
+    font-size: 1.08rem;
     margin-bottom: 25px;
 }
 
 .hero {
-    background: linear-gradient(120deg, #E9DFFF, #FFE4F0, #DDF8EF);
-    padding: 28px;
+    background: linear-gradient(
+        120deg, #F2E1D1, #FFFDF9 58%, #EAD4C1
+    );
+    padding: 30px 26px;
     border-radius: 24px;
     text-align: center;
-    border: 1px solid #FFFFFF;
+    border: 1px solid #E3CDBB;
     margin-bottom: 20px;
+    box-shadow: 0 10px 30px rgba(75,46,36,0.08);
+}
+
+.hero h2, .hero p {
+    color: #4B2E24 !important;
+}
+
+.hero-art {
+    font-size: clamp(3rem, 7vw, 5.2rem);
+    line-height: 1.25;
+    letter-spacing: .12em;
+    margin: 12px 0;
 }
 
 .soft-card {
-    background: rgba(255,255,255,0.82);
-    border: 1px solid #E8DDF6;
+    background: rgba(255,255,255,0.96);
+    color: #4B2E24;
+    border: 1px solid #E8D7C8;
     border-radius: 20px;
     padding: 20px;
     margin-bottom: 12px;
-    box-shadow: 0 5px 18px rgba(110, 78, 145, 0.06);
+    box-shadow: 0 7px 22px rgba(75,46,36,0.07);
 }
 
 .disclaimer {
-    background: #FFF1DC;
-    border: 1px solid #F3D6A6;
+    background: #FFF0D9;
+    border: 1px solid #E7C89F;
     padding: 15px;
     border-radius: 14px;
-    color: #77552C;
+    color: #603E25 !important;
 }
 
 div.stButton > button {
     border-radius: 14px;
-    border: 1px solid #DDC9F3;
+    border: 1px solid #D9BDA7;
     background: #FFFFFF;
-    color: #624B86;
-    font-weight: 700;
-    transition: 0.2s;
+    color: #4B2E24 !important;
+    font-weight: 800;
+    min-height: 2.8rem;
+    transition: all .2s ease;
 }
 
 div.stButton > button:hover {
-    background: #F1E7FF;
-    border-color: #B69ADE;
-    color: #49336B;
+    background: #F2E1D1;
+    border-color: #B98255;
+    transform: translateY(-1px);
 }
 
 div.stButton > button[kind="primary"] {
-    background: linear-gradient(90deg, #9675D4, #D78CB5);
-    color: white;
+    background: linear-gradient(90deg, #674438, #A56F4C);
+    color: white !important;
     border: none;
 }
 
 [data-testid="stMetric"] {
-    background: rgba(255,255,255,0.85);
-    padding: 15px;
-    border: 1px solid #E9DFF5;
+    background: rgba(255,255,255,0.96);
+    padding: 16px;
+    border: 1px solid #E8D7C8;
     border-radius: 16px;
 }
 
+[data-testid="stMetricLabel"],
+[data-testid="stMetricValue"],
+[data-testid="stMetricDelta"] {
+    color: #4B2E24 !important;
+}
+
 [data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #F1E9FF, #FFF0F6, #E9FFF6);
+    background: linear-gradient(180deg, #F1E2D5, #FFF9F1);
+    border-right: 1px solid #E8D7C8;
+}
+
+[data-testid="stSidebar"] * {
+    color: #4B2E24 !important;
 }
 
 .stTabs [data-baseweb="tab-list"] {
@@ -128,13 +184,30 @@ div.stButton > button[kind="primary"] {
 }
 
 .stTabs [data-baseweb="tab"] {
-    background: rgba(255,255,255,0.7);
+    background: rgba(255,255,255,0.88);
     border-radius: 12px;
     padding: 10px 16px;
+    color: #4B2E24 !important;
+}
+
+.stTabs [aria-selected="true"] {
+    background: #EAD4C1 !important;
+    color: #4B2E24 !important;
 }
 
 hr {
-    border-color: #E6D9F1;
+    border-color: #E8D7C8;
+}
+
+[data-testid="stFileUploader"] {
+    background: #FFFFFF;
+    border: 1px dashed #B98255;
+    border-radius: 16px;
+    padding: 12px;
+}
+
+.stAlert {
+    border-radius: 14px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -146,7 +219,10 @@ hr {
 
 @st.cache_resource
 def load_model():
-    if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) == 0:
+    if (
+        not os.path.exists(MODEL_PATH)
+        or os.path.getsize(MODEL_PATH) == 0
+    ):
         if os.path.exists(MODEL_PATH):
             os.remove(MODEL_PATH)
 
@@ -189,7 +265,7 @@ def load_model():
 
 
 try:
-    with st.spinner("🌸 Preparing your AI laboratory..."):
+    with st.spinner("Preparing your AI laboratory..."):
         model = load_model()
 except Exception as error:
     st.error("The trained model could not be loaded.")
@@ -213,7 +289,13 @@ def predict_probabilities(images):
     if batch.ndim == 3:
         batch = batch[np.newaxis, ...]
 
-    predictions = np.asarray(model.predict(batch, verbose=0))
+    # Direct inference avoids the predict() wrapper overhead.
+    predictions = model(batch, training=False)
+
+    if hasattr(predictions, "numpy"):
+        predictions = predictions.numpy()
+
+    predictions = np.asarray(predictions)
 
     if predictions.ndim == 1:
         predictions = predictions.reshape(-1, 1)
@@ -234,7 +316,6 @@ def predict_probabilities(images):
     if not np.all(np.isfinite(probabilities)):
         raise ValueError("The model returned invalid probabilities.")
 
-    # Do not silently reinterpret logits as probabilities.
     if np.any(probabilities < 0) or np.any(probabilities > 1):
         raise ValueError(
             "Model outputs are outside [0, 1]. Check whether "
@@ -251,7 +332,7 @@ def predict_probabilities(images):
 
 
 # =========================================================
-# 5. LIME EXPLANATION AND DIAGNOSTICS
+# 5. LIME EXPLANATION
 # =========================================================
 
 def make_lime_explanation(image_array, predicted_index, samples, seed):
@@ -263,9 +344,10 @@ def make_lime_explanation(image_array, predicted_index, samples, seed):
         labels=(predicted_index,),
         hide_color=0,
         num_samples=samples,
+        batch_size=64,
         segmentation_fn=lambda img: slic(
             img,
-            n_segments=80,
+            n_segments=55,
             compactness=10,
             sigma=1,
             start_label=0,
@@ -289,34 +371,31 @@ def render_lime_overlay(image_array, explanation, label, num_features):
     positive_segments = {
         segment_id for segment_id, weight in ranked if weight > 0
     }
+
     negative_segments = {
         segment_id for segment_id, weight in ranked if weight < 0
     }
 
-    positive_mask = np.isin(
-        segments, list(positive_segments)
-    )
-    negative_mask = np.isin(
-        segments, list(negative_segments)
-    )
+    positive_mask = np.isin(segments, list(positive_segments))
+    negative_mask = np.isin(segments, list(negative_segments))
 
     base = image_array.astype(np.float32) / 255.0
     overlay = base.copy()
 
-    # Positive contributors: mint green.
+    # Green indicates regions supporting the selected class.
     overlay[positive_mask] = (
         0.45 * overlay[positive_mask]
         + 0.55 * np.array([0.15, 0.85, 0.55])
     )
 
-    # Negative contributors: coral red.
+    # Red indicates regions opposing the selected class.
     overlay[negative_mask] = (
         0.45 * overlay[negative_mask]
         + 0.55 * np.array([1.0, 0.25, 0.35])
     )
 
-    # Draw boundaries only around selected regions.
     selected_mask = positive_mask | negative_mask
+
     visual = mark_boundaries(
         overlay,
         segments,
@@ -324,7 +403,6 @@ def render_lime_overlay(image_array, explanation, label, num_features):
         mode="outer"
     )
 
-    # Keep the explanation image legible.
     visual[~selected_mask] = (
         0.75 * visual[~selected_mask]
         + 0.25 * base[~selected_mask]
@@ -347,8 +425,6 @@ def masking_test(image_array, segments, local_weights, label):
     )
 
     masked = image_array.copy()
-
-    # Replace selected regions with the image's mean pixel value.
     fill_value = image_array.mean(axis=(0, 1))
 
     region_mask = np.isin(segments, selected_ids)
@@ -390,24 +466,33 @@ def stability_test(image_array, predicted_index, samples, first_weights):
     }
 
     union = first_top | second_top
-    overlap = (
+
+    return (
         len(first_top & second_top) / len(union)
         if union else 0.0
     )
-
-    return overlap
-
 
 # =========================================================
 # 6. SIDEBAR
 # =========================================================
 
 with st.sidebar:
-    st.markdown("# 🧠 Brain Bloom")
-    st.caption("Your colourful AI learning lab")
+    st.markdown(
+        """
+        <div style="text-align:center; padding:12px 0;">
+            <div style="font-size:4rem;">🧠</div>
+            <h2 style="margin:0;">Brain Bloom</h2>
+            <p style="color:#705D53 !important;">
+                Your AI learning laboratory
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
     st.divider()
 
-    st.markdown("### 🪻 Lab information")
+    st.markdown("### 🧪 Lab information")
     st.write("**Architecture:** VGG16")
     st.write("**Technique:** Transfer learning")
     st.write("**Explainer:** LIME")
@@ -416,18 +501,21 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown("### 🌷 Explore")
+    st.markdown("### 🧭 Explore your lab")
     st.write("🔬 MRI prediction")
     st.write("🧩 LIME explanations")
     st.write("📊 Model performance")
-    st.write("🫀 Anatomy garden")
+    st.write("🫀 Anatomy Garden")
 
     st.divider()
-    st.caption("Educational use only. Not a diagnostic tool.")
+
+    st.caption(
+        "🤎 Educational use only. Not a diagnostic tool."
+    )
 
 
 # =========================================================
-# 7. HEADER
+# 7. HEADER AND HOMEPAGE
 # =========================================================
 
 st.markdown(
@@ -436,29 +524,83 @@ st.markdown(
 )
 
 st.markdown(
-    '<div class="subtitle">'
-    'A pastel-powered virtual lab for AI, MRI and explainability'
-    '</div>',
+    """
+    <div class="subtitle">
+        A smarter way to explore brain MRI classification
+        and explainable artificial intelligence.
+    </div>
+    """,
     unsafe_allow_html=True
 )
 
-st.markdown("""
-<div class="hero">
-    <h2>Welcome to your little science universe 🌸</h2>
-    <p>Explore brain MRI classification, discover model behaviour,
-    and learn how explainable AI works.</p>
-    <p>🧠 &nbsp; 🔬 &nbsp; 🧬 &nbsp; 🫀 &nbsp; 🌷</p>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(
+    """
+    <div class="hero">
+        <div class="hero-art">🧠 🩺 🔬</div>
+        <h2>Welcome to your AI medical learning lab!</h2>
+        <p>
+            Explore MRI image classification, understand model
+            predictions and discover the regions highlighted by LIME.
+        </p>
+        <p>
+            <b>Upload. Predict. Explain. Explore.</b>
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
-st.markdown("""
-<div class="disclaimer">
-<b>Important:</b> This project is an educational demonstration.
-Predictions and LIME explanations can be incorrect. Highlighted
-regions are not verified tumor boundaries and must not be used
-to make medical decisions.
-</div>
-""", unsafe_allow_html=True)
+# Feature cards
+feature1, feature2, feature3 = st.columns(3)
+
+with feature1:
+    st.markdown(
+        """
+        <div class="soft-card" style="text-align:center;">
+            <div style="font-size:3rem;">🧠</div>
+            <h3>MRI Intelligence</h3>
+            <p>Explore the model's classification of uploaded MRI images.</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with feature2:
+    st.markdown(
+        """
+        <div class="soft-card" style="text-align:center;">
+            <div style="font-size:3rem;">🔎</div>
+            <h3>Explainable AI</h3>
+            <p>Explore image regions influencing the model's prediction.</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with feature3:
+    st.markdown(
+        """
+        <div class="soft-card" style="text-align:center;">
+            <div style="font-size:3rem;">🩺</div>
+            <h3>Learn Anatomy</h3>
+            <p>Discover interactive educational facts about the human body.</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+st.markdown(
+    """
+    <div class="disclaimer">
+        <b>Important medical notice:</b> This project is an
+        educational demonstration. Model predictions and LIME
+        explanations can be incorrect. Highlighted regions are not
+        verified tumour boundaries. Do not use this application
+        to diagnose or make medical decisions.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 st.write("")
 
@@ -475,119 +617,223 @@ tab_predict, tab_anatomy, tab_performance, tab_about = st.tabs([
 # =========================================================
 
 with tab_predict:
-    st.subheader("🌷 Upload your MRI")
+    st.subheader("🤎 Your MRI analysis lab")
 
     st.write(
-        "Upload a JPG, JPEG or PNG image to explore the "
-        "classifier's output."
+        "Upload a JPG, JPEG or PNG image to explore "
+        "the trained classifier's output."
     )
 
     uploaded_file = st.file_uploader(
-        "Choose an MRI image",
+        "📁 Choose your MRI image",
         type=["jpg", "jpeg", "png"],
         key="mri_upload"
     )
 
+    # Identify the uploaded image so stale results are not reused.
+    current_image_hash = None
+
     if uploaded_file is not None:
+        file_bytes = uploaded_file.getvalue()
+        current_image_hash = hashlib.sha256(file_bytes).hexdigest()
+
+        if (
+            st.session_state.get("current_image_hash")
+            != current_image_hash
+        ):
+            st.session_state["current_image_hash"] = current_image_hash
+            st.session_state.pop("lime_result", None)
+            st.session_state.pop("lime_error", None)
+            st.session_state.pop("stability_result", None)
+
         try:
             original = Image.open(uploaded_file).convert("RGB")
             input_image = prepare_image(original)
 
-            image_col, result_col = st.columns(2)
+            image_col, result_col = st.columns([1.05, 1])
 
             with image_col:
-                st.markdown("#### 🖼️ Your image")
-                st.image(original, use_container_width=True)
+                st.markdown("### 🖼️ Uploaded MRI")
+                st.image(
+                    original,
+                    use_container_width=True
+                )
+
+                st.caption(
+                    "The image is resized to 224 × 224 pixels "
+                    "for model inference."
+                )
 
             with result_col:
-                st.markdown("#### 🪻 Model prediction")
+                st.markdown("### 🤎 Model prediction")
 
-                with st.spinner("Analysing the image..."):
-                    probabilities = predict_probabilities(input_image)[0]
+                prediction_key = f"prediction_{current_image_hash}"
+
+                if prediction_key not in st.session_state:
+                    with st.spinner("🔬 Analysing your MRI..."):
+                        probabilities = predict_probabilities(
+                            input_image
+                        )[0]
+
+                    st.session_state[prediction_key] = probabilities
+
+                probabilities = np.asarray(
+                    st.session_state[prediction_key]
+                )
 
                 predicted_index = int(np.argmax(probabilities))
                 predicted_class = CLASS_NAMES[predicted_index]
                 confidence = float(probabilities[predicted_index])
 
-                st.metric("Predicted class", predicted_class)
-                st.metric("Model output score", f"{confidence * 100:.2f}%")
+                st.markdown(
+                    f"""
+                    <div class="soft-card">
+                        <p style="margin:0;">PREDICTED CLASS</p>
+                        <h2 style="font-size:2rem;margin-top:8px;">
+                            {predicted_class}
+                        </h2>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                st.metric(
+                    "Model output score",
+                    f"{confidence * 100:.2f}%"
+                )
 
                 for index, class_name in enumerate(CLASS_NAMES):
                     score = float(probabilities[index])
-                    st.write(f"**{class_name}:** {score * 100:.2f}%")
-                    st.progress(float(np.clip(score, 0, 1)))
+
+                    st.write(
+                        f"**{class_name}:** {score * 100:.2f}%"
+                    )
+
+                    st.progress(
+                        float(np.clip(score, 0, 1))
+                    )
 
                 st.caption(
-                    "This is a model score, not a calibrated "
-                    "probability of a clinical diagnosis."
+                    "Model score is not a calibrated probability "
+                    "of a clinical diagnosis."
                 )
 
             st.divider()
+
             st.subheader("🧩 Explain this prediction")
+
+            st.write(
+                "Generate a LIME explanation to explore image "
+                "regions that support or oppose the predicted class."
+            )
 
             samples = st.select_slider(
                 "Perturbation samples",
-                options=[500, 1000, 2000, 3000],
-                value=2000,
-                help="More samples take longer and do not guarantee validity."
+                options=[250, 500, 750, 1000, 2000],
+                value=500,
+                help=(
+                    "Fewer samples are faster but may produce "
+                    "less stable explanations. Compare settings "
+                    "before selecting a final research value."
+                )
             )
 
             num_features = st.slider(
-                "Number of influential regions to display",
+                "Number of influential regions",
                 min_value=3,
                 max_value=15,
                 value=8
             )
 
-            if st.button(
+            generate_clicked = st.button(
                 "✨ Generate LIME explanation",
                 type="primary",
-                use_container_width=True
-            ):
-                with st.spinner(
-                    "Generating the explanation and running diagnostics..."
-                ):
-                    explanation = make_lime_explanation(
-                        input_image,
-                        predicted_index,
-                        samples,
-                        seed=42
+                use_container_width=True,
+                key="generate_lime"
+            )
+
+            if generate_clicked:
+                st.session_state.pop("lime_error", None)
+
+                try:
+                    progress = st.progress(
+                        0,
+                        text="Preparing image regions..."
                     )
 
-                    visual, weights, segments = render_lime_overlay(
-                        input_image.astype(np.uint8),
-                        explanation,
-                        predicted_index,
-                        num_features
-                    )
+                    with st.spinner(
+                        "🧩 LIME is exploring the image. "
+                        "Processing time depends on your hardware."
+                    ):
+                        progress.progress(
+                            15,
+                            text="Preparing image segments..."
+                        )
 
-                    original_probability, masked_probability = masking_test(
-                        input_image,
-                        segments,
-                        weights,
-                        predicted_index
-                    )
+                        explanation = make_lime_explanation(
+                            input_image,
+                            predicted_index,
+                            samples,
+                            seed=42
+                        )
 
-                    surrogate_score = getattr(
-                        explanation, "score", None
-                    )
+                        progress.progress(
+                            80,
+                            text="Creating the explanation overlay..."
+                        )
 
-                    st.session_state["lime_result"] = {
-                        "visual": visual,
-                        "weights": weights,
-                        "segments": segments,
-                        "score": surrogate_score,
-                        "original_probability": original_probability,
-                        "masked_probability": masked_probability,
-                        "predicted_index": predicted_index,
-                        "samples": samples,
-                        "input_image": input_image.astype(np.uint8)
-                    }
+                        visual, weights, segments = render_lime_overlay(
+                            input_image.astype(np.uint8),
+                            explanation,
+                            predicted_index,
+                            num_features
+                        )
+
+                        surrogate_score = getattr(
+                            explanation, "score", None
+                        )
+
+                        # Save the main explanation before optional
+                        # diagnostic calculations.
+                        st.session_state["lime_result"] = {
+                            "visual": visual,
+                            "weights": weights,
+                            "segments": segments,
+                            "score": surrogate_score,
+                            "predicted_index": predicted_index,
+                            "samples": samples,
+                            "input_image": input_image.astype(np.uint8),
+                            "image_hash": current_image_hash,
+                            "num_features": num_features
+                        }
+
+                        progress.progress(
+                            100,
+                            text="LIME explanation generated!"
+                        )
+
+                    st.session_state.pop("stability_result", None)
+
+                except Exception as error:
+                    st.session_state["lime_error"] = str(error)
+
+            if st.session_state.get("lime_error"):
+                st.error(
+                    "Unable to generate the LIME explanation."
+                )
+
+                with st.expander("Technical details"):
+                    st.code(st.session_state["lime_error"])
 
             result = st.session_state.get("lime_result")
 
-            if result is not None:
-                st.markdown("### 🌈 Your explanation")
+            # Only show results belonging to the current upload.
+            if (
+                result is not None
+                and result.get("image_hash") == current_image_hash
+            ):
+                st.divider()
+                st.markdown("### 🌟 Your explanation")
 
                 lime_col1, lime_col2 = st.columns(2)
 
@@ -605,15 +851,26 @@ with tab_predict:
                         use_container_width=True
                     )
 
-                st.markdown("""
-                🟢 **Green:** regions supporting the selected class  
-                🔴 **Red:** regions opposing the selected class  
-                🟡 **Yellow:** superpixel boundaries
-                """)
+                st.markdown(
+                    """
+                    <div class="soft-card">
+                        <p>
+                            🟢 <b>Green:</b> regions supporting the selected class
+                        </p>
+                        <p>
+                            🔴 <b>Red:</b> regions opposing the selected class
+                        </p>
+                        <p>
+                            🟡 <b>Yellow:</b> superpixel boundaries
+                        </p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
 
                 st.caption(
-                    "Colours indicate the fitted local explanation, "
-                    "not confirmed tumor tissue."
+                    "Highlighted regions represent a local model "
+                    "explanation, not confirmed tumour tissue."
                 )
 
                 st.divider()
@@ -621,283 +878,474 @@ with tab_predict:
 
                 score = result["score"]
 
-                metric_col1, metric_col2, metric_col3 = st.columns(3)
+                metric_col1, metric_col2 = st.columns(2)
 
                 with metric_col1:
                     if score is not None and np.isfinite(score):
-                        st.metric("Local surrogate R²", f"{score:.3f}")
+                        st.metric(
+                            "Local surrogate R²",
+                            f"{score:.3f}"
+                        )
                     else:
-                        st.metric("Local surrogate R²", "Unavailable")
+                        st.metric(
+                            "Local surrogate R²",
+                            "Unavailable"
+                        )
 
                 with metric_col2:
                     st.metric(
-                        "Original class score",
-                        f"{result['original_probability'] * 100:.2f}%"
+                        "Perturbation samples",
+                        result["samples"]
                     )
-
-                with metric_col3:
-                    st.metric(
-                        "Score after masking",
-                        f"{result['masked_probability'] * 100:.2f}%"
-                    )
-
-                delta = (
-                    result["masked_probability"]
-                    - result["original_probability"]
-                )
-
-                st.write(
-                    f"**Change after masking:** {delta * 100:+.2f} "
-                    "percentage points."
-                )
-
-                st.caption(
-                    "Masking can affect the prediction in either direction. "
-                    "This single test is not sufficient to establish "
-                    "explanation faithfulness."
-                )
-
-                st.markdown("#### 🌱 Repeatability check")
-
-                if st.button("Check explanation stability"):
-                    with st.spinner("Computing a second explanation..."):
-                        overlap = stability_test(
-                            result["input_image"].astype(np.float32),
-                            result["predicted_index"],
-                            result["samples"],
-                            result["weights"]
-                        )
-
-                    st.metric(
-                        "Top-region Jaccard overlap",
-                        f"{overlap:.2f}"
-                    )
-
-                    if overlap >= 0.7:
-                        st.success(
-                            "The top-region overlap is relatively high "
-                            "for this pair of runs."
-                        )
-                    else:
-                        st.warning(
-                            "The explanation changed noticeably. "
-                            "Consider this result unstable."
-                        )
 
                 st.info(
-                    "These checks are preliminary diagnostics, not a "
-                    "complete validation protocol. R², masking sensitivity "
-                    "and stability must be interpreted together."
+                    "LIME's local surrogate score measures how well "
+                    "its simplified explanation fits the model locally. "
+                    "It does not establish clinical accuracy."
+                )
+
+                st.markdown("### 🧪 Optional diagnostic tests")
+
+                with st.expander(
+                    "Run masking sensitivity test"
+                ):
+                    st.write(
+                        "This test masks the five most influential "
+                        "regions and compares the selected class score."
+                    )
+
+                    if st.button(
+                        "Run masking test",
+                        key="run_masking"
+                    ):
+                        with st.spinner(
+                            "Testing the selected image regions..."
+                        ):
+                            original_probability, masked_probability = (
+                                masking_test(
+                                    result["input_image"].astype(np.float32),
+                                    result["segments"],
+                                    result["weights"],
+                                    result["predicted_index"]
+                                )
+                            )
+
+                        st.metric(
+                            "Original class score",
+                            f"{original_probability * 100:.2f}%"
+                        )
+
+                        st.metric(
+                            "Score after masking",
+                            f"{masked_probability * 100:.2f}%"
+                        )
+
+                        delta = (
+                            masked_probability - original_probability
+                        )
+
+                        st.write(
+                            f"**Change after masking:** "
+                            f"{delta * 100:+.2f} percentage points"
+                        )
+
+                        st.caption(
+                            "Masking sensitivity is a preliminary "
+                            "diagnostic and is not proof of explanation "
+                            "faithfulness."
+                        )
+
+                with st.expander(
+                    "Run explanation stability test"
+                ):
+                    st.write(
+                        "Generate a second LIME explanation using a "
+                        "different random seed and compare the top regions."
+                    )
+
+                    if st.button(
+                        "Check explanation stability",
+                        key="check_stability"
+                    ):
+                        with st.spinner(
+                            "Computing a second explanation..."
+                        ):
+                            overlap = stability_test(
+                                result["input_image"].astype(np.float32),
+                                result["predicted_index"],
+                                result["samples"],
+                                result["weights"]
+                            )
+
+                        st.session_state["stability_result"] = {
+                            "image_hash": current_image_hash,
+                            "overlap": overlap
+                        }
+
+                    stability = st.session_state.get(
+                        "stability_result"
+                    )
+
+                    if (
+                        stability is not None
+                        and stability.get("image_hash")
+                        == current_image_hash
+                    ):
+                        overlap = stability["overlap"]
+
+                        st.metric(
+                            "Top-region Jaccard overlap",
+                            f"{overlap:.2f}"
+                        )
+
+                        if overlap >= 0.7:
+                            st.success(
+                                "The top-region overlap is relatively "
+                                "high for this pair of runs."
+                            )
+                        else:
+                            st.warning(
+                                "The explanation changed noticeably. "
+                                "Consider this result unstable."
+                            )
+
+                st.caption(
+                    "R², masking sensitivity and repeatability should "
+                    "be interpreted together. None independently proves "
+                    "that the highlighted regions are clinically correct."
                 )
 
         except Exception as error:
-            st.error("Unable to process the image or generate LIME.")
+            st.error(
+                "Unable to process the uploaded image."
+            )
+
             with st.expander("Technical details"):
                 st.exception(error)
 
     else:
-        st.info("🌷 Upload an MRI image to begin.")
-
+        st.markdown(
+            """
+            <div class="soft-card" style="text-align:center;">
+                <div style="font-size:4rem;">🧠</div>
+                <h3>Your MRI exploration starts here</h3>
+                <p>
+                    Upload an image above to view its model prediction
+                    and generate an optional LIME explanation.
+                </p>
+                <div style="font-size:2rem;">🤎 🩺 🤎</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 # =========================================================
-# 9. CLICKABLE ANATOMY GARDEN
+# 9. ANATOMY GARDEN
 # =========================================================
 
 with tab_anatomy:
-    st.subheader("🫀 Welcome to the Anatomy Garden")
-
+    st.markdown("## 🫀 Anatomy Garden")
     st.write(
-        "Click an organ card to discover a short educational fact. "
-        "These are decorative learning cards, not medical assessments."
+        "Explore a few educational facts about the brain "
+        "and the systems that support it."
     )
 
-    organs = {
-        "🧠 Brain": (
-            "The brain processes information, coordinates movement, "
-            "and supports memory, learning and many other functions."
-        ),
-        "❤️ Heart": (
-            "The heart pumps blood through the circulatory system, "
-            "delivering oxygen and nutrients throughout the body."
-        ),
-        "🫁 Lungs": (
-            "The lungs exchange oxygen and carbon dioxide during breathing."
-        ),
-        "🫘 Kidneys": (
-            "The kidneys filter blood, regulate fluid balance, "
-            "and help maintain electrolyte levels."
-        ),
-        "🧬 DNA": (
-            "DNA stores hereditary information used in the development "
-            "and functioning of living organisms."
-        ),
-        "🦴 Skeleton": (
-            "The skeleton provides structural support, protects organs "
-            "and works with muscles to enable movement."
-        ),
-        "🫀 Liver": (
-            "The liver processes nutrients, produces bile and "
-            "helps metabolise many substances."
-        ),
-        "🦷 Teeth": (
-            "Teeth help break down food mechanically during digestion."
-        )
+    anatomy_items = {
+        "🧠 The Brain": {
+            "heading": "Your body's command centre",
+            "facts": [
+                "The brain contains billions of nerve cells.",
+                "Different brain regions contribute to movement, "
+                "memory, sensation and other functions.",
+                "MRI sequences provide different kinds of information "
+                "about brain structures and tissue."
+            ],
+            "icon": "🧠"
+        },
+        "🩸 Blood Vessels": {
+            "heading": "The brain's supply network",
+            "facts": [
+                "Blood vessels deliver oxygen and nutrients to brain tissue.",
+                "Blood flow is essential for normal brain function.",
+                "Vascular structures may have different appearances "
+                "across MRI sequences."
+            ],
+            "icon": "🩸"
+        },
+        "🦴 Skull": {
+            "heading": "A protective structure",
+            "facts": [
+                "The skull protects the brain from many external impacts.",
+                "MRI can depict soft tissues inside the skull.",
+                "MRI and CT provide different types of diagnostic information."
+            ],
+            "icon": "🦴"
+        },
+        "🧬 Neurons": {
+            "heading": "Cells that transmit information",
+            "facts": [
+                "Neurons communicate using electrical and chemical signals.",
+                "Connections between neurons help support learning and memory.",
+                "Routine MRI images do not directly show individual neurons."
+            ],
+            "icon": "🧬"
+        }
     }
 
-    if "selected_organ" not in st.session_state:
-        st.session_state["selected_organ"] = "🧠 Brain"
+    selected_anatomy = st.selectbox(
+        "Choose an anatomy topic",
+        list(anatomy_items.keys()),
+        key="anatomy_topic"
+    )
 
-    organ_items = list(organs.items())
-
-    for start in range(0, len(organ_items), 4):
-        cols = st.columns(4)
-
-        for col, (organ, fact) in zip(
-            cols, organ_items[start:start + 4]
-        ):
-            with col:
-                st.markdown('<div class="soft-card">', unsafe_allow_html=True)
-                st.markdown(f"### {organ}")
-                if st.button(
-                    "Explore ✨",
-                    key=f"organ_{organ}",
-                    use_container_width=True
-                ):
-                    st.session_state["selected_organ"] = organ
-                st.markdown("</div>", unsafe_allow_html=True)
-
-    selected = st.session_state["selected_organ"]
+    item = anatomy_items[selected_anatomy]
 
     st.markdown(
-        f'<div class="hero"><h2>{selected}</h2>'
-        f'<p>{organs[selected]}</p></div>',
+        f"""
+        <div class="soft-card">
+            <div style="font-size:4rem;text-align:center;">
+                {item["icon"]}
+            </div>
+            <h2 style="text-align:center;">
+                {item["heading"]}
+            </h2>
+        </div>
+        """,
         unsafe_allow_html=True
     )
 
+    for number, fact in enumerate(item["facts"], start=1):
+        st.markdown(
+            f"""
+            <div class="soft-card">
+                <b>Did you know? {number}</b>
+                <p>{fact}</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    st.info(
+        "This section is educational. It does not identify or "
+        "diagnose anatomical structures in your uploaded MRI."
+    )
+
 
 # =========================================================
-# 10. MODEL PERFORMANCE
+# 10. MODEL RESULTS
 # =========================================================
 
 with tab_performance:
-    st.subheader("📊 Model evaluation")
-
+    st.markdown("## 📊 Model Results")
     st.write(
-        "These are the evaluation results saved in your project. "
-        "Only actual files and recorded metrics are displayed."
+        "Review the model's output for your current MRI image "
+        "and understand which evaluation measures are relevant "
+        "to a brain tumour classification project."
     )
 
-    accuracy_path = os.path.join(RESULTS_DIR, "accuracy.png")
-    loss_path = os.path.join(RESULTS_DIR, "loss.png")
-    confusion_path = os.path.join(RESULTS_DIR, "confusion_matrix.png")
-    metrics_path = os.path.join(RESULTS_DIR, "metrics.json")
+    st.markdown("### 🧠 Prediction score comparison")
 
-    if os.path.exists(metrics_path):
-        try:
-            with open(metrics_path, "r", encoding="utf-8") as file:
-                metrics = json.load(file)
+    current_hash = st.session_state.get("current_image_hash")
+    prediction_key = (
+        f"prediction_{current_hash}" if current_hash else None
+    )
 
-            st.markdown("#### Recorded metrics")
+    if (
+        prediction_key
+        and prediction_key in st.session_state
+    ):
+        scores = np.asarray(
+            st.session_state[prediction_key]
+        )
 
-            if isinstance(metrics, dict) and metrics:
-                items = list(metrics.items())
+        score_col1, score_col2 = st.columns(2)
 
-                for start in range(0, len(items), 3):
-                    cols = st.columns(3)
+        with score_col1:
+            st.metric(
+                "Glioma model score",
+                f"{float(scores[0]) * 100:.2f}%"
+            )
 
-                    for col, (name, value) in zip(
-                        cols, items[start:start + 3]
-                    ):
-                        if isinstance(value, (int, float)):
-                            if 0 <= value <= 1:
-                                display = f"{value * 100:.2f}%"
-                            else:
-                                display = f"{value:.4g}"
-                        else:
-                            display = str(value)
+        with score_col2:
+            st.metric(
+                "Meningioma model score",
+                f"{float(scores[1]) * 100:.2f}%"
+            )
 
-                        with col:
-                            st.metric(
-                                str(name).replace("_", " ").title(),
-                                display
-                            )
-            else:
-                st.json(metrics)
+        st.bar_chart(
+            {
+                "Model output (%)": {
+                    "Glioma": float(scores[0]) * 100,
+                    "Meningioma": float(scores[1]) * 100
+                }
+            },
+            y_label="Score (%)"
+        )
 
-        except Exception as error:
-            st.warning("Could not read metrics.json.")
-            st.code(str(error))
+        st.caption(
+            "These scores describe the current image only. "
+            "They are not a dataset-level accuracy measurement."
+        )
     else:
-        st.info("metrics.json was not found.")
+        st.info(
+            "Upload an MRI in the MRI Lab tab to see its "
+            "prediction scores here."
+        )
 
-    graph_col1, graph_col2 = st.columns(2)
+    st.divider()
 
-    with graph_col1:
-        st.markdown("#### 📈 Accuracy curve")
-        if os.path.exists(accuracy_path):
-            st.image(accuracy_path, use_container_width=True)
-        else:
-            st.info("accuracy.png was not found.")
+    st.markdown("### 📘 Evaluation measures for your research")
 
-    with graph_col2:
-        st.markdown("#### 📉 Loss curve")
-        if os.path.exists(loss_path):
-            st.image(loss_path, use_container_width=True)
-        else:
-            st.info("loss.png was not found.")
+    evaluation_data = [
+        {
+            "Measure": "Accuracy",
+            "Meaning": "Proportion of all predictions that are correct."
+        },
+        {
+            "Measure": "Precision",
+            "Meaning": "Proportion of predicted positive cases that are correct."
+        },
+        {
+            "Measure": "Recall",
+            "Meaning": "Proportion of actual positive cases identified."
+        },
+        {
+            "Measure": "F1-score",
+            "Meaning": "Harmonic mean of precision and recall."
+        },
+        {
+            "Measure": "Confusion matrix",
+            "Meaning": "Shows correct and incorrect predictions by class."
+        }
+    ]
 
-    st.markdown("#### 🧮 Confusion matrix")
-    if os.path.exists(confusion_path):
-        st.image(confusion_path, use_container_width=True)
-    else:
-        st.info("confusion_matrix.png was not found.")
+    st.dataframe(
+        evaluation_data,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.warning(
+        "Do not report a single uploaded image's score as model "
+        "accuracy. Dataset-level metrics require labelled test data "
+        "and predictions from the held-out test set."
+    )
+
+    st.markdown("### 🔬 VGG16 versus VGG16 + LIME")
+
+    st.write(
+        "LIME is an explanation technique applied to a model's "
+        "predictions. Adding LIME does not automatically retrain "
+        "VGG16 or improve its classification accuracy."
+    )
+
+    st.markdown(
+        """
+        <div class="soft-card">
+            <h3>VGG16</h3>
+            <p>
+                Produces the classification output for an MRI image.
+            </p>
+            <hr>
+            <h3>VGG16 + LIME</h3>
+            <p>
+                Uses the same classifier and adds an explanation of
+                influential image regions.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     st.caption(
-        "Model performance metrics do not establish clinical suitability."
+        "For a fair research comparison, evaluate both approaches "
+        "on the same held-out dataset. Report classification metrics "
+        "separately from explanation quality and computational cost."
     )
 
 
 # =========================================================
-# 11. ABOUT THE PROJECT
+# 11. ABOUT PAGE
 # =========================================================
 
 with tab_about:
-    st.subheader("📘 How Brain Bloom works")
+    st.markdown("## 📘 About Brain Bloom")
 
-    st.markdown("""
-    <div class="soft-card">
-    <h3>1. 🖼️ MRI input</h3>
-    The uploaded image is converted to RGB and resized to 224 × 224 pixels.
-    </div>
+    st.markdown(
+        """
+        <div class="hero">
+            <div class="hero-art">🧠 🤎 🩺</div>
+            <h2>Making AI easier to understand</h2>
+            <p>
+                Brain Bloom is an educational application for exploring
+                brain MRI classification using VGG16 and explaining
+                individual predictions with LIME.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    <div class="soft-card">
-    <h3>2. 🧠 VGG16 classification</h3>
-    The trained model returns outputs for the configured classes:
-    Glioma and Meningioma.
-    </div>
+    st.markdown("### 🎯 Project objectives")
 
-    <div class="soft-card">
-    <h3>3. 🌱 Transfer learning</h3>
-    A pretrained convolutional neural network is adapted to the target task.
-    </div>
+    st.markdown(
+        """
+        - Explore brain MRI image classification.
+        - Display the classifier's predicted class and output scores.
+        - Visualize influential image regions using LIME.
+        - Demonstrate optional masking and explanation stability tests.
+        - Encourage transparent interpretation of AI outputs.
+        """
+    )
 
-    <div class="soft-card">
-    <h3>4. 🧩 LIME explainability</h3>
-    LIME perturbs image superpixels and fits a local surrogate model
-    to approximate the classifier's behaviour near the input image.
-    </div>
+    st.markdown("### ⚙️ Technologies used")
 
-    <div class="soft-card">
-    <h3>5. 🔎 Explanation diagnostics</h3>
-    Surrogate fit, masking sensitivity and repeatability help assess
-    the explanation, but none independently proves correctness.
-    </div>
-    """, unsafe_allow_html=True)
+    technology_col1, technology_col2 = st.columns(2)
 
-    st.warning(
-        "This application is configured for Glioma and Meningioma only. "
-        "It does not identify every type of brain tumor and is not "
-        "a medical diagnostic system."
+    with technology_col1:
+        st.markdown(
+            """
+            <div class="soft-card">
+                <h3>🧠 Deep learning</h3>
+                <p>TensorFlow and Keras</p>
+                <p>VGG16 image classification</p>
+                <p>NumPy image processing</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with technology_col2:
+        st.markdown(
+            """
+            <div class="soft-card">
+                <h3>🔎 Explainable AI</h3>
+                <p>LIME image explanations</p>
+                <p>Superpixel segmentation</p>
+                <p>Streamlit user interface</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    st.markdown("### 🩺 Responsible AI")
+
+    st.write(
+        "This application is a student research and educational "
+        "demonstration. It has not been established as a clinically "
+        "validated diagnostic system. Predictions may be wrong, "
+        "and LIME explanations may be unstable or misleading."
+    )
+
+    st.markdown(
+        """
+        <div class="disclaimer">
+            <b>For research and learning only.</b>
+            Always rely on qualified healthcare professionals for
+            medical interpretation and diagnosis.
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
 
@@ -908,12 +1356,22 @@ with tab_about:
 st.divider()
 
 st.markdown(
-    "<center>🌸 <b>Brain Bloom Virtual Lab</b> · "
-    "VGG16 + LIME · Made for learning 🧠</center>",
+    """
+    <div style="
+        text-align:center;
+        padding:18px 8px 30px 8px;
+        color:#705D53;
+    ">
+        <div style="font-size:2.2rem;">🧠 🤎 🩺</div>
+        <h3 style="margin-bottom:6px;">Brain Bloom</h3>
+        <p>
+            Explore the image. Understand the prediction.
+            Keep humans at the centre of healthcare.
+        </p>
+        <p style="font-size:0.85rem;">
+            Educational AI demonstration · VGG16 + LIME
+        </p>
+    </div>
+    """,
     unsafe_allow_html=True
-)
-
-st.caption(
-    "Educational use only. Predictions and explanations can be wrong. "
-    "Always consult qualified medical professionals for medical advice."
 )
