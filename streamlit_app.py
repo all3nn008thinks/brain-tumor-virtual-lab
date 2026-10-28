@@ -81,8 +81,8 @@ def load_model():
         downloaded_file = gdown.download(
             url=url,
             output=MODEL_PATH,
-            quiet=False,
-            fuzzy=True
+            quiet=False
+            
         )
 
         if (
