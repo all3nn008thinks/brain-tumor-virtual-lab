@@ -1,7 +1,6 @@
 
 import os
 import json
-import tempfile
 
 import gdown
 import numpy as np
@@ -9,6 +8,7 @@ import streamlit as st
 import tensorflow as tf
 
 from PIL import Image
+from tensorflow.keras.applications.vgg16 import preprocess_input
 from lime.lime_image import LimeImageExplainer
 from skimage.segmentation import mark_boundaries
 
@@ -18,7 +18,7 @@ from skimage.segmentation import mark_boundaries
 # =========================================================
 
 st.set_page_config(
-    page_title="Brain Tumor Virtual Lab",
+    page_title="Brain Tumor Classification Virtual Lab",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -33,56 +33,53 @@ CLASS_NAMES = ["Glioma", "Meningioma"]
 
 
 # =========================================================
-# 2. CUSTOM STYLING
+# 2. STYLING
 # =========================================================
 
 st.markdown("""
 <style>
-    .main-title {
-        font-size: 2.5rem;
-        font-weight: 750;
-        text-align: center;
-        margin-bottom: 0.2rem;
-    }
-    .subtitle {
-        text-align: center;
-        font-size: 1.05rem;
-        color: #9CA3AF;
-        margin-bottom: 1.5rem;
-    }
-    .info-card {
-        padding: 18px;
-        border-radius: 12px;
-        border: 1px solid rgba(128,128,128,0.35);
-        margin-bottom: 12px;
-    }
-    .disclaimer {
-        padding: 14px;
-        border-radius: 10px;
-        background-color: rgba(245, 158, 11, 0.12);
-        border: 1px solid rgba(245, 158, 11, 0.5);
-    }
+.main-title {
+    font-size: 2.4rem;
+    font-weight: 750;
+    text-align: center;
+    margin-bottom: 0.3rem;
+}
+.subtitle {
+    text-align: center;
+    color: #9CA3AF;
+    margin-bottom: 1.5rem;
+}
+.disclaimer {
+    padding: 14px;
+    border-radius: 10px;
+    background-color: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.5);
+}
 </style>
 """, unsafe_allow_html=True)
 
 
 # =========================================================
-# 3. MODEL DOWNLOAD AND LOADING
+# 3. DOWNLOAD AND LOAD MODEL
 # =========================================================
 
-@st.cache_resource(show_spinner="Downloading and loading the VGG16 model...")
+@st.cache_resource
 def load_model():
-    if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) == 0:
+
+    # Download the model only if it is not already available.
+    if (
+        not os.path.exists(MODEL_PATH)
+        or os.path.getsize(MODEL_PATH) == 0
+    ):
         if os.path.exists(MODEL_PATH):
             os.remove(MODEL_PATH)
 
-        url = f"https://drive.google.com/uc?id={FILE_ID}"
+        download_url = f"https://drive.google.com/uc?id={FILE_ID}"
 
         downloaded_file = gdown.download(
-            url=url,
+            url=download_url,
             output=MODEL_PATH,
             quiet=False
-            
         )
 
         if (
@@ -91,48 +88,72 @@ def load_model():
             or os.path.getsize(MODEL_PATH) == 0
         ):
             raise RuntimeError(
-                "The model could not be downloaded. "
-                "Check that Google Drive sharing is set to "
-                "'Anyone with the link' and that the file is accessible."
+                "Model download failed. Check that Google Drive "
+                "sharing is set to Anyone with the link."
             )
+
+    # Register the custom VGG16 preprocessing function.
+    custom_objects = {
+        "preprocess_input": preprocess_input,
+        "keras.applications.vgg16.preprocess_input": preprocess_input,
+    }
 
     try:
         return tf.keras.models.load_model(
             MODEL_PATH,
             compile=False,
-            safe_mode=False
+            safe_mode=False,
+            custom_objects=custom_objects
         )
+
     except TypeError:
-        # Compatibility fallback for older Keras versions.
+        # Compatibility fallback for TensorFlow/Keras versions
+        # that do not accept the safe_mode parameter.
         return tf.keras.models.load_model(
             MODEL_PATH,
-            compile=False
+            compile=False,
+            custom_objects=custom_objects
         )
+
+
+try:
+    with st.spinner("Loading the trained VGG16 model..."):
+        model = load_model()
+
+except Exception as error:
+    st.error("Unable to load the trained model.")
+    st.write(
+        "Check the Google Drive link, model download, "
+        "and TensorFlow/Keras compatibility."
+    )
+
+    with st.expander("Technical error details", expanded=True):
+        st.code(str(error))
+
+    st.stop()
 
 
 # =========================================================
-# 4. PREDICTION FUNCTIONS
+# 4. IMAGE PREPARATION AND PREDICTION
 # =========================================================
 
 def prepare_image(image):
-    """Convert an image to RGB and resize it for VGG16."""
+    """Convert image to RGB and resize it to 224 x 224."""
     image = image.convert("RGB")
     image = image.resize(IMG_SIZE)
+
     return np.asarray(image, dtype=np.float32)
 
 
-def predict_probabilities(images, model):
-    """
-    Predict probabilities for a batch of RGB images.
+def predict_probabilities(images):
 
-    The saved model contains its own VGG16 preprocessing layer.
-    Therefore, input pixels remain in the 0-255 range.
-    """
     batch = np.asarray(images, dtype=np.float32)
 
     if batch.ndim == 3:
         batch = np.expand_dims(batch, axis=0)
 
+    # The model already contains its preprocessing Lambda layer.
+    # Do not apply preprocess_input a second time.
     predictions = np.asarray(
         model.predict(batch, verbose=0)
     )
@@ -140,93 +161,80 @@ def predict_probabilities(images, model):
     if predictions.ndim == 1:
         predictions = predictions.reshape(-1, 1)
 
-    # Binary model with one sigmoid output.
+    # One sigmoid output.
     if predictions.shape[-1] == 1:
-        positive_probability = predictions[:, 0]
+        positive = predictions[:, 0]
+
         probabilities = np.column_stack([
-            1.0 - positive_probability,
-            positive_probability
+            1.0 - positive,
+            positive
         ])
 
-    # Binary model with two softmax outputs.
+    # Two softmax outputs.
     elif predictions.shape[-1] == 2:
         probabilities = predictions
 
     else:
         raise ValueError(
-            f"Expected a binary model with 1 or 2 outputs, "
-            f"but received {predictions.shape[-1]} outputs."
+            "Expected a binary model with one or two outputs. "
+            f"Received {predictions.shape[-1]} outputs."
         )
 
     return probabilities
 
 
 # =========================================================
-# 5. LOAD MODEL
-# =========================================================
-
-try:
-    model = load_model()
-except Exception as error:
-    st.error("Unable to load the trained model.")
-    st.info(
-        "Check the Google Drive sharing permissions, model file ID, "
-        "and the deployment logs."
-    )
-    with st.expander("Technical error details"):
-        st.code(str(error))
-    st.stop()
-
-
-# =========================================================
-# 6. SIDEBAR
+# 5. SIDEBAR
 # =========================================================
 
 with st.sidebar:
     st.title("🧠 Brain Tumor Virtual Lab")
-    st.caption("VGG16 + LIME | Educational AI Project")
+    st.caption("VGG16 + LIME")
 
     st.divider()
 
-    st.markdown("### Navigation")
-    st.markdown("- MRI Prediction")
-    st.markdown("- LIME Explanation")
-    st.markdown("- Model Performance")
-    st.markdown("- How It Works")
+    st.markdown("### Project Modules")
+    st.markdown("""
+    - MRI Image Prediction
+    - LIME Explainability
+    - Model Performance
+    - About the Project
+    """)
 
     st.divider()
 
-    st.markdown("### Model Information")
+    st.markdown("### Model Details")
     st.write("**Architecture:** VGG16")
-    st.write("**Learning method:** Transfer learning")
-    st.write("**Explainability:** LIME")
-    st.write("**Input:** MRI image")
+    st.write("**Method:** Transfer learning")
+    st.write("**Explanation:** LIME")
+    st.write("**Input size:** 224 × 224")
     st.write("**Classes:** Glioma, Meningioma")
 
 
 # =========================================================
-# 7. HEADER
+# 6. HEADER AND DISCLAIMER
 # =========================================================
 
 st.markdown(
-    '<div class="main-title">🧠 Brain Tumor Classification Virtual Lab</div>',
+    '<div class="main-title">'
+    '🧠 Brain Tumor Classification Virtual Lab'
+    '</div>',
     unsafe_allow_html=True
 )
 
 st.markdown(
     '<div class="subtitle">'
-    'Explore deep learning predictions and visual explanations using VGG16 and LIME'
+    'Explore image classification using VGG16 and LIME'
     '</div>',
     unsafe_allow_html=True
 )
 
 st.markdown("""
 <div class="disclaimer">
-<b>Educational disclaimer:</b> This project is intended only for
-learning and demonstration. It is not a medical device and must not
-be used to diagnose, exclude, or treat a brain tumor. Model predictions
-may be incorrect. Consult a qualified medical professional for medical
-interpretation.
+<b>Educational use only:</b> This project is a learning
+demonstration, not a medical diagnostic tool. Model predictions
+may be incorrect and must not be used to make medical decisions.
+Consult a qualified medical professional for medical interpretation.
 </div>
 """, unsafe_allow_html=True)
 
@@ -234,7 +242,7 @@ st.write("")
 
 
 # =========================================================
-# 8. TABS
+# 7. APPLICATION TABS
 # =========================================================
 
 tab_predict, tab_performance, tab_about = st.tabs([
@@ -245,7 +253,7 @@ tab_predict, tab_performance, tab_about = st.tabs([
 
 
 # =========================================================
-# 9. PREDICTION AND LIME EXPLANATION
+# 8. PREDICT AND EXPLAIN
 # =========================================================
 
 with tab_predict:
@@ -253,47 +261,53 @@ with tab_predict:
     st.subheader("Upload an MRI Image")
 
     st.write(
-        "Upload an image to explore how the trained binary classifier "
-        "responds to it."
+        "Upload a JPG, JPEG, or PNG image to explore the "
+        "trained binary classifier's output."
     )
 
     uploaded_file = st.file_uploader(
         "Choose an MRI image",
-        type=["jpg", "jpeg", "png"],
-        help="Supported formats: JPG, JPEG, PNG"
+        type=["jpg", "jpeg", "png"]
     )
 
     if uploaded_file is not None:
 
         try:
-            original_image = Image.open(uploaded_file).convert("RGB")
+            original_image = Image.open(
+                uploaded_file
+            ).convert("RGB")
+
             input_image = prepare_image(original_image)
 
-            left, right = st.columns([1, 1])
+            image_col, prediction_col = st.columns(2)
 
-            with left:
+            with image_col:
                 st.markdown("#### Uploaded Image")
+
                 st.image(
                     original_image,
-                    caption="Uploaded MRI image",
                     use_container_width=True
                 )
 
-            with right:
-                st.markdown("#### Prediction")
+            with prediction_col:
+                st.markdown("#### Model Prediction")
 
-                with st.spinner("Analysing image..."):
+                with st.spinner("Predicting..."):
                     probabilities = predict_probabilities(
-                        input_image,
-                        model
+                        input_image
                     )[0]
 
-                predicted_index = int(np.argmax(probabilities))
+                predicted_index = int(
+                    np.argmax(probabilities)
+                )
+
                 predicted_class = CLASS_NAMES[predicted_index]
-                confidence = float(probabilities[predicted_index])
+                confidence = float(
+                    probabilities[predicted_index]
+                )
 
                 st.metric(
-                    "Model prediction",
+                    "Predicted class",
                     predicted_class
                 )
 
@@ -303,107 +317,107 @@ with tab_predict:
                 )
 
                 st.caption(
-                    "This score reflects the model's output, "
-                    "not the probability of a clinical diagnosis."
+                    "The score reflects model output, not the "
+                    "probability of a clinical diagnosis."
                 )
 
-                st.markdown("**Output scores**")
+                st.markdown("**Class scores**")
+
                 for index, class_name in enumerate(CLASS_NAMES):
+                    score = float(probabilities[index])
+
                     st.write(
-                        f"{class_name}: "
-                        f"{probabilities[index] * 100:.2f}%"
+                        f"{class_name}: {score * 100:.2f}%"
                     )
+
                     st.progress(
-                        float(np.clip(probabilities[index], 0.0, 1.0))
+                        float(np.clip(score, 0.0, 1.0))
                     )
 
             st.divider()
 
-            st.subheader("LIME: Explain the Prediction")
+            st.subheader("LIME Explanation")
 
             st.write(
-                "LIME highlights image regions that influence the model's "
-                "prediction for this particular image. The highlighted "
-                "areas are explanations of model behaviour, not confirmed "
-                "tumor boundaries."
+                "LIME highlights regions that influence the model's "
+                "prediction for this particular image. These highlights "
+                "are not verified tumor boundaries."
             )
 
-            if st.button("Generate LIME Explanation", type="primary"):
+            if st.button(
+                "Generate LIME Explanation",
+                type="primary"
+            ):
 
                 with st.spinner(
-                    "Generating explanation. This may take some time..."
+                    "Generating LIME explanation..."
                 ):
-                    try:
-                        explainer = LimeImageExplainer()
+                    explainer = LimeImageExplainer()
 
-                        def lime_predict(batch):
-                            return predict_probabilities(batch, model)
+                    def lime_predict(images):
+                        return predict_probabilities(images)
 
-                        explanation = explainer.explain_instance(
-                            input_image.astype(np.uint8),
-                            classifier_fn=lime_predict,
-                            labels=[predicted_index],
-                            top_labels=None,
-                            hide_color=0,
-                            num_samples=500
-                        )
+                    explanation = explainer.explain_instance(
+                        input_image.astype(np.uint8),
+                        classifier_fn=lime_predict,
+                        labels=[predicted_index],
+                        top_labels=None,
+                        hide_color=0,
+                        num_samples=500
+                    )
 
-                        lime_image, mask = explanation.get_image_and_mask(
+                    lime_image, mask = (
+                        explanation.get_image_and_mask(
                             label=predicted_index,
                             positive_only=False,
                             num_features=10,
                             hide_rest=False
                         )
+                    )
 
-                        highlighted_image = mark_boundaries(
-                            lime_image / 255.0,
-                            mask
-                        )
+                    visual = mark_boundaries(
+                        lime_image / 255.0,
+                        mask
+                    )
 
-                        st.success("LIME explanation generated.")
+                lime_col1, lime_col2 = st.columns(2)
 
-                        lime_col1, lime_col2 = st.columns(2)
+                with lime_col1:
+                    st.markdown("**Resized input**")
 
-                        with lime_col1:
-                            st.markdown("**Original resized image**")
-                            st.image(
-                                input_image.astype(np.uint8),
-                                use_container_width=True
-                            )
+                    st.image(
+                        input_image.astype(np.uint8),
+                        use_container_width=True
+                    )
 
-                        with lime_col2:
-                            st.markdown("**LIME highlighted regions**")
-                            st.image(
-                                highlighted_image,
-                                use_container_width=True
-                            )
+                with lime_col2:
+                    st.markdown("**LIME highlighted regions**")
 
-                        st.caption(
-                            "Green boundaries identify selected superpixels. "
-                            "Positive and negative regions can both appear "
-                            "because positive_only=False."
-                        )
+                    st.image(
+                        visual,
+                        use_container_width=True
+                    )
 
-                    except Exception as lime_error:
-                        st.error("Could not generate the LIME explanation.")
-                        with st.expander("Technical error details"):
-                            st.code(str(lime_error))
+                st.caption(
+                    "Green boundaries mark selected superpixels. "
+                    "LIME explains model behaviour locally; it does "
+                    "not establish clinical evidence."
+                )
 
-        except Exception as image_error:
-            st.error("Could not process this image.")
-            st.caption("Try another valid JPG or PNG image.")
+        except Exception as error:
+            st.error("Unable to process this image or generate the explanation.")
+
             with st.expander("Technical error details"):
-                st.code(str(image_error))
+                st.code(str(error))
 
     else:
         st.info(
-            "Upload an MRI image above to explore the model prediction "
-            "and generate a LIME explanation."
+            "Upload an image to begin prediction and explanation."
         )
 
 
 # =========================================================
-# 10. MODEL PERFORMANCE
+# 9. MODEL PERFORMANCE
 # =========================================================
 
 with tab_performance:
@@ -411,57 +425,74 @@ with tab_performance:
     st.subheader("Model Evaluation Results")
 
     st.write(
-        "The following results are loaded from the evaluation files "
-        "generated by the training notebook."
+        "These visualizations and metrics come from the saved "
+        "evaluation files in the GitHub repository."
     )
 
-    accuracy_path = os.path.join(RESULTS_DIR, "accuracy.png")
-    loss_path = os.path.join(RESULTS_DIR, "loss.png")
-    confusion_path = os.path.join(RESULTS_DIR, "confusion_matrix.png")
-    metrics_path = os.path.join(RESULTS_DIR, "metrics.json")
+    accuracy_path = os.path.join(
+        RESULTS_DIR, "accuracy.png"
+    )
 
-    available_metrics = False
+    loss_path = os.path.join(
+        RESULTS_DIR, "loss.png"
+    )
+
+    confusion_path = os.path.join(
+        RESULTS_DIR, "confusion_matrix.png"
+    )
+
+    metrics_path = os.path.join(
+        RESULTS_DIR, "metrics.json"
+    )
 
     if os.path.exists(metrics_path):
+
         try:
-            with open(metrics_path, "r", encoding="utf-8") as file:
+            with open(
+                metrics_path,
+                "r",
+                encoding="utf-8"
+            ) as file:
                 metrics = json.load(file)
 
             st.markdown("#### Evaluation Metrics")
 
-            if isinstance(metrics, dict):
-                metric_columns = st.columns(
-                    min(max(len(metrics), 1), 3)
+            if isinstance(metrics, dict) and metrics:
+
+                metric_items = list(metrics.items())
+                columns = st.columns(
+                    min(len(metric_items), 3)
                 )
 
-                for index, (name, value) in enumerate(metrics.items()):
-                    with metric_columns[index % len(metric_columns)]:
-                        if isinstance(value, (int, float)):
-                            if 0 <= value <= 1:
-                                display_value = f"{value * 100:.2f}%"
-                            else:
-                                display_value = f"{value:.4g}"
-                        else:
-                            display_value = str(value)
+                for index, (name, value) in enumerate(metric_items):
 
+                    if isinstance(value, (int, float)):
+                        if 0 <= value <= 1:
+                            display_value = (
+                                f"{value * 100:.2f}%"
+                            )
+                        else:
+                            display_value = f"{value:.4g}"
+                    else:
+                        display_value = str(value)
+
+                    with columns[index % len(columns)]:
                         st.metric(
                             str(name).replace("_", " ").title(),
                             display_value
                         )
 
-                available_metrics = True
             else:
                 st.json(metrics)
-                available_metrics = True
 
-        except Exception as metrics_error:
-            st.warning("The metrics file could not be read.")
-            st.caption(str(metrics_error))
+        except Exception as error:
+            st.warning("Could not read metrics.json.")
+            st.code(str(error))
 
-    if not available_metrics:
+    else:
         st.info(
-            "Metrics are not available yet. Add metrics.json to the "
-            "brain_tumor_results folder in your GitHub repository."
+            "metrics.json is missing from the "
+            "brain_tumor_results folder."
         )
 
     st.divider()
@@ -474,11 +505,10 @@ with tab_performance:
         if os.path.exists(accuracy_path):
             st.image(
                 accuracy_path,
-                caption="Training and validation accuracy",
                 use_container_width=True
             )
         else:
-            st.info("accuracy.png has not been added yet.")
+            st.warning("accuracy.png was not found.")
 
     with graph_col2:
         st.markdown("#### Loss Curve")
@@ -486,70 +516,65 @@ with tab_performance:
         if os.path.exists(loss_path):
             st.image(
                 loss_path,
-                caption="Training and validation loss",
                 use_container_width=True
             )
         else:
-            st.info("loss.png has not been added yet.")
+            st.warning("loss.png was not found.")
 
     st.markdown("#### Confusion Matrix")
 
     if os.path.exists(confusion_path):
         st.image(
             confusion_path,
-            caption="Confusion matrix from model evaluation",
             use_container_width=True
         )
     else:
-        st.info("confusion_matrix.png has not been added yet.")
+        st.warning("confusion_matrix.png was not found.")
 
     st.caption(
-        "Performance results depend on the dataset and evaluation procedure. "
-        "They do not establish clinical suitability."
+        "Evaluation results do not establish clinical suitability."
     )
 
 
 # =========================================================
-# 11. HOW IT WORKS
+# 10. HOW IT WORKS
 # =========================================================
 
 with tab_about:
 
-    st.subheader("How the Virtual Lab Works")
+    st.subheader("About the Project")
 
     st.markdown("""
-    #### 1. Image Input
-    A user uploads an MRI image in JPG, JPEG, or PNG format.
-    The image is converted to RGB and resized to 224 × 224 pixels.
+    #### 1. MRI Image Input
+    The user uploads an MRI image. The application converts it to RGB
+    and resizes it to 224 × 224 pixels.
 
     #### 2. VGG16 Classification
-    The trained VGG16-based model processes the image and returns scores
-    for the two classes used in this project: glioma and meningioma.
+    The trained VGG16-based model produces scores for the two classes
+    included in this project: glioma and meningioma.
 
     #### 3. Transfer Learning
-    VGG16 is a convolutional neural network architecture commonly used
-    for image classification. Transfer learning reuses learned image
-    features and adapts the model to a specific classification task.
+    Transfer learning reuses features learned by a pretrained
+    convolutional neural network and adapts them to a target task.
 
     #### 4. LIME Explainability
-    LIME perturbs regions of the uploaded image and observes how the
-    model's output changes. It highlights regions that influence the
-    selected prediction locally.
+    LIME perturbs image regions and examines changes in model output
+    to explain a prediction locally.
 
     #### 5. Performance Evaluation
     Accuracy and loss curves, the confusion matrix, and saved metrics
-    help demonstrate how the model performed during evaluation.
+    summarize model evaluation.
     """)
 
     st.warning(
-        "This demonstration covers only glioma and meningioma. "
-        "It does not classify pituitary tumors or no-tumor images, "
-        "even if such images are uploaded."
+        "This model is configured for glioma and meningioma only. "
+        "It is not a four-class classifier and does not identify "
+        "pituitary tumors or no-tumor cases."
     )
 
 
 # =========================================================
-# 12. FOOTER
+# 11. FOOTER
 # =========================================================
 
 st.divider()
