@@ -6,3 +6,4 @@ Pillow
 lime
 scikit-image
 matplotlib
+gdown
