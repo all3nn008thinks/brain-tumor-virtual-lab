@@ -119,6 +119,17 @@ except Exception as exc:
     st.exception(exc)
     st.stop()
 
+# Trace the model call once so repeated LIME batches avoid some eager-call overhead.
+# The dynamic first dimension allows the final batch to contain fewer images.
+@tf.function(
+    input_signature=[
+        tf.TensorSpec(shape=[None, IMAGE_SIZE[0], IMAGE_SIZE[1], 3], dtype=tf.float32)
+    ],
+    reduce_retracing=True,
+)
+def run_model_inference(batch):
+    return model(batch, training=False)
+
 # ============================================================
 # 4. IMAGE PREPARATION + CLASS PREDICTION
 # ============================================================
@@ -132,7 +143,7 @@ def predict_probabilities(images):
     batch = np.asarray(images, dtype=np.float32)
     if batch.ndim == 3:
         batch = batch[np.newaxis, ...]
-    outputs = model(batch, training=False)
+    outputs = run_model_inference(tf.convert_to_tensor(batch, dtype=tf.float32))
     if hasattr(outputs, "numpy"):
         outputs = outputs.numpy()
     outputs = np.asarray(outputs)
@@ -164,13 +175,13 @@ def segment_image(image):
     """Support both newer and older scikit-image SLIC APIs."""
     try:
         return slic(
-            image, n_segments=45, compactness=10, sigma=1,
+            image, n_segments=35, compactness=10, sigma=1,
             start_label=0, channel_axis=-1
         )
     except TypeError:
         # Compatibility with older scikit-image releases.
         return slic(
-            image, n_segments=45, compactness=10, sigma=1,
+            image, n_segments=35, compactness=10, sigma=1,
             start_label=0, multichannel=True
         )
 
@@ -189,20 +200,55 @@ def make_lime_explanation(image_array, predicted_index, samples=LIME_SAMPLES, se
 
 
 def render_lime_overlay(image_array, explanation, label, num_features=LIME_FEATURES):
+    """Render only influential superpixels that overlap the MRI foreground.
+
+    This avoids highlighting large, nearly black background superpixels and
+    avoids drawing boundaries around every segment in the image.
+    """
     segments = explanation.segments
     weights = dict(explanation.local_exp[int(label)])
-    ranked = sorted(weights.items(), key=lambda pair: abs(pair[1]), reverse=True)[:num_features]
+
+    # Exclude near-black scanner/background pixels from the display only.
+    # This is a visualization filter, not a tumour/background segmentation.
+    foreground = np.max(image_array, axis=2) > 12
+    candidate_ids = []
+    for segment_id in weights:
+        region = (segments == segment_id)
+        if np.any(region) and float(foreground[region].mean()) >= 0.50:
+            candidate_ids.append(segment_id)
+
+    ranked = sorted(
+        ((sid, weights[sid]) for sid in candidate_ids),
+        key=lambda pair: abs(pair[1]),
+        reverse=True,
+    )[:num_features]
+
     positive_ids = {sid for sid, weight in ranked if weight > 0}
     negative_ids = {sid for sid, weight in ranked if weight < 0}
-    positive_mask = np.isin(segments, list(positive_ids))
-    negative_mask = np.isin(segments, list(negative_ids))
+    positive_mask = np.isin(segments, list(positive_ids)) & foreground
+    negative_mask = np.isin(segments, list(negative_ids)) & foreground
     selected_mask = positive_mask | negative_mask
+
     base = image_array.astype(np.float32) / 255.0
     overlay = base.copy()
-    overlay[positive_mask] = 0.45 * overlay[positive_mask] + 0.55 * np.array([0.15, 0.85, 0.55])
-    overlay[negative_mask] = 0.45 * overlay[negative_mask] + 0.55 * np.array([1.0, 0.25, 0.35])
-    visual = mark_boundaries(overlay, segments, color=(1.0, 0.85, 0.15), mode="outer")
-    visual[~selected_mask] = 0.75 * visual[~selected_mask] + 0.25 * base[~selected_mask]
+    overlay[positive_mask] = (
+        0.45 * overlay[positive_mask]
+        + 0.55 * np.array([0.15, 0.85, 0.55])
+    )
+    overlay[negative_mask] = (
+        0.45 * overlay[negative_mask]
+        + 0.55 * np.array([1.0, 0.25, 0.35])
+    )
+
+    # Keep boundaries only around the selected influential regions.
+    selected_segments = np.full(segments.shape, -1, dtype=np.int32)
+    selected_segments[selected_mask] = segments[selected_mask]
+    visual = mark_boundaries(
+        overlay, selected_segments, color=(1.0, 0.85, 0.15), mode="outer"
+    )
+    visual[~selected_mask] = (
+        0.85 * visual[~selected_mask] + 0.15 * base[~selected_mask]
+    )
     return np.clip(visual, 0, 1), weights, segments
 
 
@@ -335,8 +381,7 @@ with tab_predict:
             st.divider()
             st.markdown("## 🧩 Explain this prediction")
             st.write(
-                f"Click below to generate a LIME explanation using {LIME_SAMPLES} samples. "
-                "The settings are fixed, so there are no sliders."
+                "LIME highlights image regions that influence the model's prediction."
             )
             generate_clicked = st.button(
                 "✨ Generate LIME explanation", type="primary", use_container_width=True, key="generate_lime"
@@ -348,31 +393,35 @@ with tab_predict:
                     st.info("A LIME explanation is already available for this image.")
                 else:
                     st.session_state.pop("lime_error", None)
-                    progress_bar = st.progress(0, text="Preparing image regions...")
-                    status_box = st.empty()
                     try:
-                        with st.spinner("Generating LIME explanation. This may take a little time..."):
-                            status_box.info("Running LIME perturbation samples...")
+                        with st.spinner(
+                            "Generating LIME explanation. The first run can take longer while TensorFlow prepares inference."
+                        ):
                             explanation = make_lime_explanation(
-                                input_image.astype(np.uint8), predicted_index, samples=LIME_SAMPLES, seed=42
+                                input_image.astype(np.uint8),
+                                predicted_index,
+                                samples=LIME_SAMPLES,
+                                seed=42,
                             )
-                            progress_bar.progress(80, text="Rendering the explanation overlay...")
                             visual, weights, segments = render_lime_overlay(
-                                input_image.astype(np.uint8), explanation, predicted_index, LIME_FEATURES
+                                input_image.astype(np.uint8),
+                                explanation,
+                                predicted_index,
+                                LIME_FEATURES,
                             )
                             score = getattr(explanation, "score", None)
                             st.session_state["lime_result"] = {
-                                "visual": visual, "weights": weights, "segments": segments,
-                                "score": score, "predicted_index": predicted_index,
-                                "samples": LIME_SAMPLES, "input_image": input_image.astype(np.uint8),
+                                "visual": visual,
+                                "weights": weights,
+                                "segments": segments,
+                                "score": score,
+                                "predicted_index": predicted_index,
+                                "samples": LIME_SAMPLES,
+                                "input_image": input_image.astype(np.uint8),
                                 "image_hash": image_hash,
                             }
-                        progress_bar.progress(100, text="LIME explanation generated!")
-                        status_box.success("LIME explanation generated.")
                     except Exception as exc:
                         st.session_state["lime_error"] = f"{type(exc).__name__}: {exc}"
-                        progress_bar.empty()
-                        status_box.empty()
 
             if st.session_state.get("lime_error"):
                 st.error("Unable to generate the LIME explanation.")
@@ -400,8 +449,17 @@ with tab_predict:
                 score = result["score"]
                 if score is not None and np.isfinite(score):
                     st.metric("LIME local surrogate score (R²)", f"{score:.3f}")
+                    st.caption(
+                        "R² describes how well LIME's local surrogate fitted the model's perturbed predictions for this run. "
+                        "It is not a clinical-validity score and has no universal pass/fail cutoff."
+                    )
                 else:
                     st.info("LIME did not provide a local surrogate score for this run.")
+                st.warning(
+                    "This overlay is a model explanation, not a tumour segmentation. "
+                    "A plausible-looking image alone cannot confirm that the explanation is reliable. "
+                    "Review its local R², repeatability and masking sensitivity, and validate the method on a dataset before making research claims."
+                )
 
                 with st.expander("Optional: masking sensitivity test"):
                     st.write("Masks the five most influential regions and compares the selected class score. This runs only when requested.")
